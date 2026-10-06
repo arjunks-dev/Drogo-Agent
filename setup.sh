@@ -278,23 +278,58 @@ ensure_node() {
 # ----------------------------------------------------------------------------
 # AI CLI installers (npm global, with postinstall-script fix for npm>=12-as-root)
 # ----------------------------------------------------------------------------
+# Make sure binaries from user-level native installers are findable this run.
+ensure_local_bin_on_path() {
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac
+}
+
+# Run a command, capturing combined output; on failure print the tail so the real
+# error reaches the terminal AND the install log (instead of being swallowed).
+run_show_on_fail() {
+  local label="$1"; shift
+  local errf; errf="$(mktemp 2>/dev/null || echo /tmp/redteam-$$.err)"
+  if "$@" >"$errf" 2>&1; then rm -f "$errf"; return 0; fi
+  warn "$label failed — last lines:"
+  tail -n 25 "$errf" | sed 's/^/    /' >&2
+  rm -f "$errf"; return 1
+}
+
 npm_global_with_postinstall() {
   # $1 = npm package, $2 = postinstall script filename inside the pkg, $3 = bin to verify
   # Global npm installs write to a root-owned prefix, so use sudo when not root.
   local pkg="$1" post="$2" bin="$3"
-  $SUDO npm install -g "$pkg" >/dev/null 2>&1 || { warn "npm install -g $pkg failed"; return 1; }
+  run_show_on_fail "npm install -g $pkg" $SUDO npm install -g "$pkg" || return 1
   local root; root="$(npm root -g)/$pkg"
   if [ -n "$post" ] && [ -f "$root/$post" ]; then
     ( cd "$root" && $SUDO node "$post" ) >/dev/null 2>&1 || warn "$pkg postinstall ($post) reported an issue"
   fi
+  ensure_local_bin_on_path
   command -v "$bin" >/dev/null 2>&1 && return 0 || return 1
 }
 
 install_claude() {
   step "Claude Code"
-  if command -v claude >/dev/null 2>&1; then ok "claude present ($(claude --version 2>&1 | head -1))"; else
-    npm_global_with_postinstall "@anthropic-ai/claude-code" "install.cjs" "claude" \
-      && ok "claude $(claude --version 2>&1 | head -1)" || { warn "claude install failed"; return 1; }
+  if command -v claude >/dev/null 2>&1; then
+    ok "claude present ($(claude --version 2>&1 | head -1))"
+  elif npm_global_with_postinstall "@anthropic-ai/claude-code" "install.cjs" "claude"; then
+    ok "claude $(claude --version 2>&1 | head -1)"
+  else
+    # npm path failed (e.g. Node version/engine or prefix issues). Fall back to
+    # Anthropic's official native installer, which ships a standalone binary to
+    # ~/.local/bin and does not depend on the system Node/npm at all.
+    warn "npm install of Claude Code failed; trying the official native installer (claude.ai/install.sh)..."
+    if run_show_on_fail "claude native install" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
+      ensure_local_bin_on_path
+      if command -v claude >/dev/null 2>&1; then
+        ok "claude installed via native installer ($(claude --version 2>&1 | head -1))"
+      else
+        warn "claude native install ran but 'claude' is not on PATH (expected in ~/.local/bin). Open a new shell and re-run: ./setup.sh reconfigure"
+        return 1
+      fi
+    else
+      warn "claude install failed (npm and native installer). See the log: ${LOG_FILE:-<no log>}"
+      return 1
+    fi
   fi
   install_claude_extras
 }
@@ -329,9 +364,14 @@ install_claude_extras() {
 install_codex() {
   step "Codex"
   if command -v codex >/dev/null 2>&1; then ok "codex present ($(codex --version 2>&1 | head -1))"; return; fi
-  $SUDO npm install -g @openai/codex >/dev/null 2>&1 \
-    && command -v codex >/dev/null 2>&1 \
-    && ok "codex $(codex --version 2>&1 | head -1)" || warn "codex install failed (npm i -g @openai/codex)"
+  if run_show_on_fail "npm install -g @openai/codex" $SUDO npm install -g @openai/codex; then
+    ensure_local_bin_on_path
+    command -v codex >/dev/null 2>&1 \
+      && ok "codex $(codex --version 2>&1 | head -1)" \
+      || warn "codex installed but not on PATH — open a new shell or check \$(npm bin -g)"
+  else
+    warn "codex install failed. See the log: ${LOG_FILE:-<no log>}"
+  fi
 }
 
 install_opencode() {
@@ -515,6 +555,8 @@ build_alias_block() {
   echo "$ALIAS_MARKER_BEGIN"
   echo "# Managed by redteam-agent setup.sh — do not edit between markers."
   echo "export REDTEAM_AGENT_DIR=\"$AGENT_DIR\""
+  # Native CLI installers (e.g. Claude Code's install.sh) drop binaries here.
+  echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac'
   echo "alias redteam-setup='bash \"$REPO_DIR/setup.sh\"'"
   has_cli claude   && echo "alias redteam-claude='cd \"$AGENT_DIR\" && claude'"
   has_cli opencode && echo "alias redteam-opencode='cd \"$AGENT_DIR\" && opencode'"
