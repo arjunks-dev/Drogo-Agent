@@ -13,7 +13,9 @@
 #   ./setup.sh reconfigure             add/enable more CLIs or the service later
 #   ./setup.sh auth [claude|codex]     (re)run interactive authentication
 #   ./setup.sh status                  show what is installed/configured
-#   ./setup.sh uninstall               remove service + aliases (keeps agent files)
+#   ./setup.sh uninstall               remove service + aliases, then optionally
+#                                      the agent dir and the source directory
+#   ./uninstall.sh                     standalone uninstaller (wraps the above)
 #
 # Flags (install / reconfigure):
 #   --cli <list>       comma list of: claude,codex,opencode,ollama  (or 'all')
@@ -30,6 +32,9 @@
 # (the web UI launches engagements as containers). Everything is automatic except
 # Claude/Codex authentication, which pauses for your browser login then continues.
 #
+# Every install/uninstall run is logged to ./logs/<cmd>-<timestamp>.log (next to
+# this script) so you can review exactly what happened.
+#
 # Only for authorized security testing. See README / SETUP.md.
 
 set -uo pipefail
@@ -44,6 +49,8 @@ ALIAS_MARKER_BEGIN="# >>> redteam-agent aliases >>>"
 ALIAS_MARKER_END="# <<< redteam-agent aliases <<<"
 DEFAULT_AGENT_DIR="$HOME/redteam-agent"
 DEFAULT_PORT=18000
+LOG_DIR="$REPO_DIR/logs"          # install/uninstall logs live next to setup.sh
+LOG_FILE=""
 
 # Defaults (overridable by flags / existing config)
 CLIS=""
@@ -70,6 +77,19 @@ warn() { printf "${C_Y}[!]${C_0} %s\n" "$*" >&2; }
 err()  { printf "${C_R}[x]${C_0} %s\n" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 step() { printf "\n${C_B}=== %s ===${C_0}\n" "$*"; }
+
+# Tee all further output to a timestamped plain-text log under $LOG_DIR so the
+# install/uninstall run can be reviewed later (both logs sit next to setup.sh).
+# Colours are disabled while logging so the file stays clean/readable.
+start_logging() {
+  local kind="${1:-setup}"
+  mkdir -p "$LOG_DIR" 2>/dev/null || { warn "Cannot create log dir $LOG_DIR; continuing without a log file."; return 0; }
+  LOG_FILE="$LOG_DIR/${kind}-$(date +%Y%m%d-%H%M%S).log"
+  C_R=''; C_G=''; C_Y=''; C_B=''; C_0=''
+  # Line-buffer the tee so the terminal and file stay in sync.
+  exec > >(tee -a "$LOG_FILE") 2>&1
+  info "Logging this run to $LOG_FILE"
+}
 
 SUDO=""
 need_sudo() {
@@ -582,7 +602,9 @@ do_status() {
 }
 
 do_uninstall() {
-  step "Uninstall (service + aliases; agent files kept)"
+  start_logging uninstall
+  load_conf
+  step "Uninstall"
   systemctl --user disable --now redteam-orchestrator.service >/dev/null 2>&1 || true
   rm -f "$HOME/.config/systemd/user/redteam-orchestrator.service"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
@@ -593,7 +615,37 @@ do_uninstall() {
     sed -i "/$(printf '%s' "$ALIAS_MARKER_BEGIN" | sed 's/[][\.*^$/]/\\&/g')/,/$(printf '%s' "$ALIAS_MARKER_END" | sed 's/[][\.*^$/]/\\&/g')/d" "$rc"
     ok "Aliases removed from $rc"
   done
-  info "Agent files in $AGENT_DIR and installed CLIs were left in place."
+  info "Installed CLIs (claude/codex/opencode/ollama) and the pentest toolchain were left in place."
+
+  # Optional: remove the agent runtime directory.
+  if [ -d "$AGENT_DIR" ]; then
+    if prompt_yes_no "Also remove the agent runtime dir '$AGENT_DIR'?" n; then
+      rm -rf "$AGENT_DIR" && ok "Removed agent runtime dir: $AGENT_DIR"
+    else
+      info "Agent files in $AGENT_DIR were left in place."
+    fi
+  fi
+
+  # Final prompt: optionally remove the installer source directory too.
+  warn "Installer source directory: $REPO_DIR"
+  if prompt_yes_no "Remove the source directory '$REPO_DIR' as well?" n; then
+    # Preserve this uninstall log outside the directory we are about to delete.
+    local saved=""
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+      saved="$HOME/$(basename "$LOG_FILE")"
+      cp -f "$LOG_FILE" "$saved" 2>/dev/null && info "Uninstall log copied to $saved (the one in the source dir will be deleted)."
+    fi
+    cd "$HOME" 2>/dev/null || cd / 2>/dev/null || true
+    if rm -rf "$REPO_DIR"; then
+      ok "Source directory removed: $REPO_DIR"
+      [ -n "$saved" ] && echo "Uninstall log preserved at: $saved"
+    else
+      err "Could not fully remove $REPO_DIR (remove it manually if needed)."
+    fi
+  else
+    info "Source directory kept: $REPO_DIR"
+    [ -n "$LOG_FILE" ] && echo "This uninstall log: $LOG_FILE"
+  fi
 }
 
 # ----------------------------------------------------------------------------
@@ -621,6 +673,7 @@ print_summary() {
 # Main
 # ----------------------------------------------------------------------------
 main_install() {
+  start_logging "$CMD"
   load_conf
   guard_user
   need_sudo

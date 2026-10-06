@@ -195,11 +195,35 @@ For real engagements on modest hardware, a cloud provider via OpenCode (OpenRout
 
 ---
 
+## Logs
+
+Every install/uninstall run is written to a timestamped plain-text log next to
+the script, so you can review exactly what happened:
+
+```
+logs/install-YYYYMMDD-HHMMSS.log
+logs/reconfigure-YYYYMMDD-HHMMSS.log
+logs/uninstall-YYYYMMDD-HHMMSS.log
+```
+
+---
+
 ## Uninstall
 
 ```bash
-./setup.sh uninstall     # stops+removes the service and the alias block
+./uninstall.sh           # standalone uninstaller (recommended)
+# or equivalently:
+./setup.sh uninstall
 ```
 
-Installed CLIs, the agent dir, and the pentest toolchain are left in place
-(remove them manually if desired).
+The uninstaller:
+
+1. stops + removes the Orchestrator systemd service,
+2. removes the managed alias block from `~/.bashrc` / `~/.zshrc`,
+3. asks whether to also remove the **agent runtime dir** (`~/redteam-agent`), and
+4. finally asks whether to remove the **installer source directory** as well.
+
+Installed CLIs (claude/codex/opencode/ollama) and the pentest toolchain are left
+in place (remove them manually if desired). If you choose to delete the source
+directory, the uninstall log is first copied to your home directory so it
+survives the deletion.

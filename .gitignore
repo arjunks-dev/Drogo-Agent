@@ -4,6 +4,8 @@
 /.claude/
 /.codex/
 /.worktrees/
+# setup.sh / uninstall.sh install+uninstall run logs
+/logs/
 /CLAUDE.md
 /AGENTS.md
 /LOCAL_REVIEW_WORKFLOW.md
