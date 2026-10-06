@@ -36,7 +36,14 @@ RUN python3 -m venv /opt/mitmproxy-venv && \
 # layer is cached forever, leaving the image stuck on whatever version was
 # `latest` at first build.
 ADD https://registry.npmjs.org/opencode-ai/latest /tmp/opencode-latest.json
-RUN npm install -g opencode-ai@latest && rm -f /tmp/opencode-latest.json
+# npm 12 as root skips package lifecycle scripts, so opencode-ai's postinstall
+# (which downloads the platform binary) does not run and `opencode` errors with
+# "postinstall script was not run". Run it explicitly, then assert the binary
+# works so a broken image fails the build instead of shipping silently.
+RUN npm install -g opencode-ai@latest && \
+    ( cd "$(npm root -g)/opencode-ai" && node postinstall.mjs ) && \
+    opencode --version && \
+    rm -f /tmp/opencode-latest.json
 
 COPY --from=katana-bin /usr/local/bin/katana /usr/local/bin/katana
 
