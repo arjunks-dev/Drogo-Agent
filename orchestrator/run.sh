@@ -116,7 +116,9 @@ NEED_BUILD=0
 
 if [[ "$NEED_BUILD" -eq 1 ]]; then
   if ensure_node_on_path; then
-    [[ -d "$FRONTEND_DIR/node_modules" ]] || (cd "$FRONTEND_DIR" && npm install)
+    # Always run npm install here (idempotent when complete; repairs a partial
+    # install, e.g. one interrupted with Ctrl-C that left vite missing).
+    (cd "$FRONTEND_DIR" && npm install)
     (cd "$FRONTEND_DIR" && npm run build >/dev/null)
   elif [[ -f "$DIST_DIR/index.html" ]]; then
     echo "npm not found; serving existing frontend build in $DIST_DIR" >&2
