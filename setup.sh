@@ -79,6 +79,20 @@ need_sudo() {
   fi
 }
 
+# Run as the normal user — setup.sh uses sudo only where needed. Running the whole
+# script under sudo would put auth tokens, aliases, the agent dir and ~/.claude in
+# /root instead of your home. Warn (and offer to abort) in that case.
+guard_user() {
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    warn "You are running setup.sh with sudo (as root)."
+    warn "User files (Claude/Codex auth, aliases, $DEFAULT_AGENT_DIR, ~/.claude) would land in /root, not /home/$SUDO_USER."
+    warn "Recommended: re-run WITHOUT sudo as your normal user — it will sudo only for apt/docker/npm."
+    if [ "$ASSUME_YES" -eq 0 ]; then
+      prompt_yes_no "Continue as root anyway?" n || die "Aborted. Re-run as: ./setup.sh"
+    fi
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Config persistence (for reconfigure/status)
 # ----------------------------------------------------------------------------
@@ -246,11 +260,12 @@ ensure_node() {
 # ----------------------------------------------------------------------------
 npm_global_with_postinstall() {
   # $1 = npm package, $2 = postinstall script filename inside the pkg, $3 = bin to verify
+  # Global npm installs write to a root-owned prefix, so use sudo when not root.
   local pkg="$1" post="$2" bin="$3"
-  npm install -g "$pkg" >/dev/null 2>&1 || { warn "npm install -g $pkg failed"; return 1; }
+  $SUDO npm install -g "$pkg" >/dev/null 2>&1 || { warn "npm install -g $pkg failed"; return 1; }
   local root; root="$(npm root -g)/$pkg"
   if [ -n "$post" ] && [ -f "$root/$post" ]; then
-    ( cd "$root" && node "$post" ) >/dev/null 2>&1 || warn "$pkg postinstall ($post) reported an issue"
+    ( cd "$root" && $SUDO node "$post" ) >/dev/null 2>&1 || warn "$pkg postinstall ($post) reported an issue"
   fi
   command -v "$bin" >/dev/null 2>&1 && return 0 || return 1
 }
@@ -294,7 +309,7 @@ install_claude_extras() {
 install_codex() {
   step "Codex"
   if command -v codex >/dev/null 2>&1; then ok "codex present ($(codex --version 2>&1 | head -1))"; return; fi
-  npm install -g @openai/codex >/dev/null 2>&1 \
+  $SUDO npm install -g @openai/codex >/dev/null 2>&1 \
     && command -v codex >/dev/null 2>&1 \
     && ok "codex $(codex --version 2>&1 | head -1)" || warn "codex install failed (npm i -g @openai/codex)"
 }
@@ -607,6 +622,8 @@ print_summary() {
 # ----------------------------------------------------------------------------
 main_install() {
   load_conf
+  guard_user
+  need_sudo
   if [ -z "$CLIS" ] && [ "$ASSUME_YES" -eq 0 ]; then interactive_select; fi
   [ -n "$CLIS" ] || die "No CLIs selected. Use --cli claude,opencode[,codex,ollama] or run interactively."
   [ -z "$WANT_ORCH" ] && WANT_ORCH="no"

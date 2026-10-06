@@ -185,6 +185,11 @@ fi
 echo ""
 if [ $ERRORS -gt 0 ]; then
     fail "$ERRORS prerequisite(s) missing."
+    echo ""
+    echo "install.sh only generates the agent config; it does not install dependencies."
+    echo "For a full native install that installs these for you (jq, the AI CLIs, the"
+    echo "pentest toolchain, optional web UI), run as your normal user:"
+    echo "    ./setup.sh"
     exit 1
 fi
 ok "All prerequisites satisfied"
