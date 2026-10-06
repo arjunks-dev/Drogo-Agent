@@ -277,13 +277,34 @@ install_mitmproxy() {
 ensure_node() {
   step "Node.js"
   if command -v node >/dev/null 2>&1; then
-    local v; v="$(node --version 2>/dev/null)"; ok "node present ($v)"; return
+    local v; v="$(node --version 2>/dev/null)"; ok "node present ($v)"
+  else
+    info "Installing Node.js LTS via NodeSource..."
+    need_sudo
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | $SUDO -E bash - >/dev/null 2>&1 \
+      && $SUDO apt-get install -y nodejs >/dev/null 2>&1 \
+      && ok "node $(node --version)" || { warn "NodeSource failed, trying apt nodejs npm"; $SUDO apt-get install -y nodejs npm >/dev/null 2>&1 && ok "node (apt)" || die "Node.js install failed"; }
   fi
-  info "Installing Node.js LTS via NodeSource..."
+  ensure_npm
+}
+
+# Debian/Kali ship the `nodejs` package WITHOUT npm (npm is a separate package),
+# so `node` can be present while `npm` is missing — which breaks the CLI installs
+# (codex), the frontend build, and the orchestrator. Ensure npm exists.
+ensure_npm() {
+  resolve_npm_on_path
+  if command -v npm >/dev/null 2>&1; then
+    ok "npm present ($(npm --version 2>/dev/null))"; return 0
+  fi
+  warn "npm not found (Debian/Kali split it from nodejs) — installing..."
   need_sudo
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | $SUDO -E bash - >/dev/null 2>&1 \
-    && $SUDO apt-get install -y nodejs >/dev/null 2>&1 \
-    && ok "node $(node --version)" || { warn "NodeSource failed, trying apt nodejs npm"; $SUDO apt-get install -y nodejs npm >/dev/null 2>&1 && ok "node (apt)" || die "Node.js install failed"; }
+  if $SUDO apt-get install -y npm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    ok "npm installed via apt ($(npm --version 2>/dev/null))"
+  elif curl -qL https://www.npmjs.com/install.sh | $SUDO sh >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    ok "npm installed via npmjs.com installer ($(npm --version 2>/dev/null))"
+  else
+    warn "Could not install npm automatically. Install it manually: sudo apt install -y npm"
+  fi
 }
 
 # ----------------------------------------------------------------------------
