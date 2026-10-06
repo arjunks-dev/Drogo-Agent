@@ -32,6 +32,29 @@ find_listening_pid() {
   "$lsof_bin" -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1
 }
 
+# npm/node may be installed per-user (nvm) and NOT on PATH under systemd or any
+# non-interactive shell (which never sources ~/.bashrc / ~/.zshrc). Try to make
+# npm resolvable: load nvm, then fall back to common node bin locations.
+ensure_node_on_path() {
+  command -v npm >/dev/null 2>&1 && return 0
+  local nvm_sh
+  for nvm_sh in "${NVM_DIR:-$HOME/.nvm}/nvm.sh" "$HOME/.nvm/nvm.sh"; do
+    if [[ -s "$nvm_sh" ]]; then
+      # shellcheck disable=SC1090
+      \. "$nvm_sh" >/dev/null 2>&1 || true
+      command -v npm >/dev/null 2>&1 && return 0
+    fi
+  done
+  local d
+  for d in "$HOME"/.nvm/versions/node/*/bin "$HOME/.local/bin" /usr/local/bin /usr/bin; do
+    if [[ -x "$d/npm" ]]; then
+      export PATH="$d:$PATH"
+      command -v npm >/dev/null 2>&1 && return 0
+    fi
+  done
+  return 1
+}
+
 usage() {
   cat <<EOF
 Usage: ./orchestrator/run.sh [--foreground] [--rebuild]
@@ -82,11 +105,28 @@ fi
 "$BACKEND_VENV/bin/python" -m pip install --quiet --upgrade pip
 "$BACKEND_VENV/bin/python" -m pip install --quiet -e "$BACKEND_DIR"
 
-if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
-  (cd "$FRONTEND_DIR" && npm install)
-fi
+# Build the frontend only when needed. Once built, the backend serves the static
+# files from frontend/dist and npm is NOT required to run the service — so a box
+# where npm lives in nvm (not on the systemd PATH) can still start the UI.
+DIST_DIR="$FRONTEND_DIR/dist"
+NEED_BUILD=0
+[[ -d "$FRONTEND_DIR/node_modules" ]] || NEED_BUILD=1
+[[ -d "$DIST_DIR" && -f "$DIST_DIR/index.html" ]] || NEED_BUILD=1
+[[ "$REBUILD_IMAGE" -eq 1 ]] && NEED_BUILD=1
 
-(cd "$FRONTEND_DIR" && npm run build >/dev/null)
+if [[ "$NEED_BUILD" -eq 1 ]]; then
+  if ensure_node_on_path; then
+    [[ -d "$FRONTEND_DIR/node_modules" ]] || (cd "$FRONTEND_DIR" && npm install)
+    (cd "$FRONTEND_DIR" && npm run build >/dev/null)
+  elif [[ -f "$DIST_DIR/index.html" ]]; then
+    echo "npm not found; serving existing frontend build in $DIST_DIR" >&2
+  else
+    echo "ERROR: npm not found and no prebuilt frontend at $DIST_DIR." >&2
+    echo "Build it once from an interactive shell (where nvm/npm is loaded):" >&2
+    echo "    cd \"$FRONTEND_DIR\" && npm install && npm run build" >&2
+    exit 1
+  fi
+fi
 
 if [[ "$REBUILD_IMAGE" -eq 1 ]]; then
   echo "Rebuilding redteam-allinone:latest and redteam-allinone:dev ..."

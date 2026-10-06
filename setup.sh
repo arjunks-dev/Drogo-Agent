@@ -307,6 +307,20 @@ _npm_init() {
   if [ "$(id -u)" -eq 0 ] || { [ -n "$gp" ] && [ -w "$gp" ]; }; then NPM_NEEDS_SUDO=0; else NPM_NEEDS_SUDO=1; fi
   return 0
 }
+# Make npm resolvable in this (non-interactive) shell: load nvm, else search
+# common node bin dirs. Mirrors run.sh's ensure_node_on_path.
+resolve_npm_on_path() {
+  command -v npm >/dev/null 2>&1 && return 0
+  local nvm_sh d
+  for nvm_sh in "${NVM_DIR:-$HOME/.nvm}/nvm.sh" "$HOME/.nvm/nvm.sh"; do
+    if [ -s "$nvm_sh" ]; then . "$nvm_sh" >/dev/null 2>&1 || true; command -v npm >/dev/null 2>&1 && return 0; fi
+  done
+  for d in "$HOME"/.nvm/versions/node/*/bin "$HOME/.local/bin" /usr/local/bin /usr/bin; do
+    if [ -x "$d/npm" ]; then export PATH="$d:$PATH"; command -v npm >/dev/null 2>&1 && return 0; fi
+  done
+  return 1
+}
+
 npm_g() {
   _npm_init || { echo "npm not found on PATH" >&2; return 1; }
   if [ "$NPM_NEEDS_SUDO" -eq 1 ]; then need_sudo; sudo env "PATH=$PATH" "$NPM_BIN" "$@"; else "$NPM_BIN" "$@"; fi
@@ -547,11 +561,19 @@ setup_orchestrator() {
   "$od/backend/.venv/bin/pip" install -q -e "$od/backend" >/dev/null 2>&1 \
     && ok "Backend deps installed" || warn "Backend pip install had issues"
 
-  # Frontend build (needs node)
-  if command -v npm >/dev/null 2>&1 && [ -d "$od/frontend" ]; then
-    info "Building frontend (npm ci + build)..."
-    ( cd "$od/frontend" && (npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1) && npm run build >/dev/null 2>&1 ) \
-      && ok "Frontend built" || warn "Frontend build had issues (UI may be unavailable)"
+  # Frontend build (needs node/npm). npm may live in nvm and not be on this
+  # non-interactive PATH, so make it resolvable before building.
+  resolve_npm_on_path
+  local node_bin_dir=""
+  if command -v npm >/dev/null 2>&1; then
+    node_bin_dir="$(dirname "$(command -v npm)")"
+    if [ -d "$od/frontend" ]; then
+      info "Building frontend (npm ci + build)..."
+      ( cd "$od/frontend" && (npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1) && npm run build >/dev/null 2>&1 ) \
+        && ok "Frontend built" || warn "Frontend build had issues (UI may be unavailable)"
+    fi
+  else
+    warn "npm not found — frontend not prebuilt. run.sh will try to build it on first start."
   fi
 
   # systemd user unit
@@ -567,6 +589,7 @@ Type=simple
 WorkingDirectory=$od
 Environment=HOST=127.0.0.1
 Environment=PORT=$PORT
+Environment=PATH=${node_bin_dir:+$node_bin_dir:}%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/env bash $od/run.sh --foreground
 Restart=on-failure
 RestartSec=3
