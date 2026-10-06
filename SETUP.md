@@ -73,7 +73,7 @@ Install / reconfigure flags:
 |------|---------|
 | `--cli <list>` | comma list of `claude,codex,opencode,ollama` — or `all` |
 | `--orchestrator` / `--no-orchestrator` | enable/skip the web UI systemd service |
-| `--agent-dir <dir>` | agent runtime location (default `~/redteam-agent`) |
+| `--agent-dir <dir>` | agent runtime base (default `~/redteam-agent`); each CLI gets its own subdir `<dir>/{claude,opencode,codex}` |
 | `--port <port>` | orchestrator port (default `18000`) |
 | `--yes` | non-interactive; accept defaults, skip prompts |
 | `--skip-tools` | do not apt-install the pentest toolchain (assume present) |
@@ -88,7 +88,7 @@ Install / reconfigure flags:
 2. **Node.js** — installed via NodeSource if missing (needed by the CLIs and the UI).
 3. **CLIs** — only the ones you chose, each via `npm install -g` (OpenCode and Claude Code get their native-binary postinstall run explicitly, which npm-as-root otherwise skips).
 4. **Claude extras** (if claude chosen) — `claude-mem` plugin, context **headroom** config (`autoCompact` on in `~/.claude/settings.json`), and the agent skills (installed with the Claude runtime).
-5. **Agent runtime** — generated per CLI into `~/redteam-agent` via the repo's `install.sh`, then forced to `REDTEAM_RUNTIME_MODE=local`.
+5. **Agent runtime** — generated per CLI into its **own** directory `~/redteam-agent/<cli>` via the repo's `install.sh`, then forced to `REDTEAM_RUNTIME_MODE=local`. (Each CLI gets a separate dir because `install.sh` produces a single-CLI runtime per directory and wipes the others on each run — separate dirs let Claude/OpenCode/Codex coexist. The `redteam-<cli>` aliases `cd` into the matching dir.)
 6. **MCP** — Metasploit MCP wired under the agent dir when Metasploit is present.
 7. **Docker + image** (only if the orchestrator is selected) — installs the Docker engine and builds the `redteam-allinone:latest` image. The web UI launches each engagement as a container, so this is required for UI runs. (`--no-build-image` skips the build.)
 8. **Orchestrator service** — backend venv + frontend build + a `systemd --user` unit (`redteam-orchestrator.service`), enabled and started on `http://127.0.0.1:<port>`.

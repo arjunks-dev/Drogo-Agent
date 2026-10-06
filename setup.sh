@@ -137,6 +137,17 @@ load_conf() {
   [ -n "${REDTEAM_PORT:-}" ]      && PORT="$REDTEAM_PORT"
 }
 
+# install.sh produces a SINGLE-CLI runtime per directory — each run wipes the
+# other CLIs' config (.claude/.opencode/.codex) in that dir. So every CLI gets
+# its own runtime directory under $AGENT_DIR to let them coexist.
+cli_runtime_dir() { echo "$AGENT_DIR/$1"; }
+# Preferred default CLI for the bare `redteam` alias: claude > opencode > codex.
+preferred_cli() {
+  has_cli claude && { echo claude; return; }
+  has_cli opencode && { echo opencode; return; }
+  has_cli codex && { echo codex; return; }
+}
+
 has_cli() { case ",$CLIS," in *",$1,"*) return 0;; *) return 1;; esac; }
 
 # ----------------------------------------------------------------------------
@@ -283,6 +294,28 @@ ensure_local_bin_on_path() {
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac
 }
 
+# Decide how global npm installs must run. A bare `sudo npm` fails when Node was
+# installed per-user (nvm / user prefix) because npm is not on root's PATH — and
+# sudo is not even needed there (the prefix is user-writable). Only elevate when
+# the global prefix is NOT writable (e.g. NodeSource under /usr), and then via
+# `sudo env PATH=…` so sudo can still find node+npm.
+_npm_init() {
+  [ -n "${NPM_BIN:-}" ] && return 0
+  NPM_BIN="$(command -v npm 2>/dev/null)"; NODE_BIN="$(command -v node 2>/dev/null)"
+  [ -n "$NPM_BIN" ] || return 1
+  local gp; gp="$("$NPM_BIN" config get prefix 2>/dev/null)"
+  if [ "$(id -u)" -eq 0 ] || { [ -n "$gp" ] && [ -w "$gp" ]; }; then NPM_NEEDS_SUDO=0; else NPM_NEEDS_SUDO=1; fi
+  return 0
+}
+npm_g() {
+  _npm_init || { echo "npm not found on PATH" >&2; return 1; }
+  if [ "$NPM_NEEDS_SUDO" -eq 1 ]; then need_sudo; sudo env "PATH=$PATH" "$NPM_BIN" "$@"; else "$NPM_BIN" "$@"; fi
+}
+node_g() {
+  _npm_init || { echo "node not found on PATH" >&2; return 1; }
+  if [ "$NPM_NEEDS_SUDO" -eq 1 ]; then need_sudo; sudo env "PATH=$PATH" "$NODE_BIN" "$@"; else "$NODE_BIN" "$@"; fi
+}
+
 # Run a command, capturing combined output; on failure print the tail so the real
 # error reaches the terminal AND the install log (instead of being swallowed).
 run_show_on_fail() {
@@ -298,10 +331,10 @@ npm_global_with_postinstall() {
   # $1 = npm package, $2 = postinstall script filename inside the pkg, $3 = bin to verify
   # Global npm installs write to a root-owned prefix, so use sudo when not root.
   local pkg="$1" post="$2" bin="$3"
-  run_show_on_fail "npm install -g $pkg" $SUDO npm install -g "$pkg" || return 1
-  local root; root="$(npm root -g)/$pkg"
+  run_show_on_fail "npm install -g $pkg" npm_g install -g "$pkg" || return 1
+  local root; root="$(npm root -g 2>/dev/null)/$pkg"
   if [ -n "$post" ] && [ -f "$root/$post" ]; then
-    ( cd "$root" && $SUDO node "$post" ) >/dev/null 2>&1 || warn "$pkg postinstall ($post) reported an issue"
+    ( cd "$root" && node_g "$post" ) >/dev/null 2>&1 || warn "$pkg postinstall ($post) reported an issue"
   fi
   ensure_local_bin_on_path
   command -v "$bin" >/dev/null 2>&1 && return 0 || return 1
@@ -364,7 +397,7 @@ install_claude_extras() {
 install_codex() {
   step "Codex"
   if command -v codex >/dev/null 2>&1; then ok "codex present ($(codex --version 2>&1 | head -1))"; return; fi
-  if run_show_on_fail "npm install -g @openai/codex" $SUDO npm install -g @openai/codex; then
+  if run_show_on_fail "npm install -g @openai/codex" npm_g install -g @openai/codex; then
     ensure_local_bin_on_path
     command -v codex >/dev/null 2>&1 \
       && ok "codex $(codex --version 2>&1 | head -1)" \
@@ -397,42 +430,49 @@ install_ollama() {
 # Agent runtime (reuses the repo's install.sh per CLI) — forces local mode
 # ----------------------------------------------------------------------------
 install_agent_runtime() {
-  step "Agent runtime -> $AGENT_DIR"
+  step "Agent runtime -> $AGENT_DIR/<cli>"
   mkdir -p "$AGENT_DIR"
-  local did=0
+  local did=0 cli target
   for cli in claude opencode codex; do
     has_cli "$cli" || continue
-    info "Generating $cli runtime..."
-    # Skip install.sh's prereq checks: it unconditionally requires a running Docker
-    # daemon even for non-docker products, which a native Kali install does not have.
-    # setup.sh has already ensured the CLI + jq/sqlite3/python3/git itself.
+    target="$(cli_runtime_dir "$cli")"
+    mkdir -p "$target"
+    info "Generating $cli runtime -> $target"
+    # Each CLI lives in its OWN dir so install.sh's single-CLI cleanup (which wipes
+    # .claude/.opencode/.codex) can't clobber a sibling CLI. Skip install.sh's prereq
+    # checks + its Step-3 Docker tool-image builds: local mode runs tools natively,
+    # and those compose-based images are unneeded (and break without the compose v2
+    # plugin). setup.sh already ensured the CLI + jq/sqlite3/python3/git.
     if REDTEAM_SKIP_PREREQ_CHECKS=1 REDTEAM_SKIP_DOCKER_IMAGE_CHECKS=1 \
-         bash "$REPO_DIR/install.sh" "$cli" "$AGENT_DIR" >/dev/null 2>&1; then
-      ok "$cli runtime installed"
+         bash "$REPO_DIR/install.sh" "$cli" "$target" >/dev/null 2>&1; then
+      ok "$cli runtime installed ($target)"
       did=1
     else
-      warn "install.sh $cli reported an issue — re-run: ./install.sh $cli $AGENT_DIR"
+      warn "install.sh $cli reported an issue — re-run: ./install.sh $cli $target"
+    fi
+    # Force local runtime mode (Kali has the tools natively — no Docker tool containers).
+    if [ -f "$target/.env" ]; then
+      if grep -q '^REDTEAM_RUNTIME_MODE=' "$target/.env"; then
+        sed -i 's/^REDTEAM_RUNTIME_MODE=.*/REDTEAM_RUNTIME_MODE=local/' "$target/.env"
+      else
+        echo 'REDTEAM_RUNTIME_MODE=local' >> "$target/.env"
+      fi
     fi
   done
-  [ "$did" -eq 1 ] || warn "No CLI runtime generated (ollama-only install has no agent config)"
-  # Force local runtime mode (Kali has the tools natively — no Docker tool containers).
-  if [ -f "$AGENT_DIR/.env" ]; then
-    if grep -q '^REDTEAM_RUNTIME_MODE=' "$AGENT_DIR/.env"; then
-      sed -i 's/^REDTEAM_RUNTIME_MODE=.*/REDTEAM_RUNTIME_MODE=local/' "$AGENT_DIR/.env"
-    else
-      echo 'REDTEAM_RUNTIME_MODE=local' >> "$AGENT_DIR/.env"
-    fi
-    ok "Runtime mode set to local"
-  fi
+  [ "$did" -eq 1 ] && ok "Runtime mode set to local for all CLIs" \
+                   || warn "No CLI runtime generated (ollama-only install has no agent config)"
 }
 
 setup_mcp() {
   has_cli claude || has_cli opencode || return 0
   step "MCP wiring"
+  # The Metasploit MCP vendor lives under the OpenCode runtime (fallback: claude).
+  local mcp_dir
+  if has_cli opencode; then mcp_dir="$(cli_runtime_dir opencode)"; else mcp_dir="$(cli_runtime_dir claude)"; fi
   if command -v msfconsole >/dev/null 2>&1 || prompt_yes_no "Set up Metasploit MCP anyway?" n; then
     if [ -f "$REPO_DIR/agent/scripts/install_metasploit_mcp.sh" ]; then
-      bash "$REPO_DIR/agent/scripts/install_metasploit_mcp.sh" "$AGENT_DIR" >/dev/null 2>&1 \
-        && ok "Metasploit MCP installed under $AGENT_DIR/.opencode/vendor" \
+      bash "$REPO_DIR/agent/scripts/install_metasploit_mcp.sh" "$mcp_dir" >/dev/null 2>&1 \
+        && ok "Metasploit MCP installed under $mcp_dir/.opencode/vendor" \
         || warn "Metasploit MCP setup failed (needs python3-venv + network)"
     fi
   else
@@ -558,13 +598,13 @@ build_alias_block() {
   # Native CLI installers (e.g. Claude Code's install.sh) drop binaries here.
   echo 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac'
   echo "alias redteam-setup='bash \"$REPO_DIR/setup.sh\"'"
-  has_cli claude   && echo "alias redteam-claude='cd \"$AGENT_DIR\" && claude'"
-  has_cli opencode && echo "alias redteam-opencode='cd \"$AGENT_DIR\" && opencode'"
-  has_cli codex    && echo "alias redteam-codex='cd \"$AGENT_DIR\" && codex'"
+  # Each CLI runs from its own runtime dir ($AGENT_DIR/<cli>).
+  has_cli claude   && echo "alias redteam-claude='cd \"$AGENT_DIR/claude\" && claude'"
+  has_cli opencode && echo "alias redteam-opencode='cd \"$AGENT_DIR/opencode\" && opencode'"
+  has_cli codex    && echo "alias redteam-codex='cd \"$AGENT_DIR/codex\" && codex'"
   # Default launcher: prefer claude > opencode > codex
-  local def=""
-  has_cli claude && def="claude"; [ -z "$def" ] && has_cli opencode && def="opencode"; [ -z "$def" ] && has_cli codex && def="codex"
-  [ -n "$def" ] && echo "alias redteam='cd \"$AGENT_DIR\" && $def'"
+  local def; def="$(preferred_cli)"
+  [ -n "$def" ] && echo "alias redteam='cd \"$AGENT_DIR/$def\" && $def'"
   [ "$WANT_ORCH" = "yes" ] && echo "alias redteam-ui='xdg-open http://127.0.0.1:$PORT >/dev/null 2>&1 || echo http://127.0.0.1:$PORT'"
   echo "$ALIAS_MARKER_END"
 }
@@ -628,7 +668,7 @@ do_status() {
   load_conf
   step "RedTeam Agent — status"
   echo "Config:        $CONF_FILE"
-  echo "Agent dir:     $AGENT_DIR"
+  echo "Agent dir:     $AGENT_DIR  (per-CLI: $AGENT_DIR/{claude,opencode,codex})"
   echo "CLIs selected: ${CLIS:-<none>}"
   echo "Orchestrator:  ${WANT_ORCH:-<unset>} (port $PORT)"
   echo ""
@@ -695,7 +735,7 @@ do_uninstall() {
 # ----------------------------------------------------------------------------
 print_summary() {
   step "Done"
-  echo "Agent runtime:  $AGENT_DIR  (REDTEAM_RUNTIME_MODE=local)"
+  echo "Agent runtime:  $AGENT_DIR/<cli>  (REDTEAM_RUNTIME_MODE=local; one dir per CLI)"
   echo "CLIs:           $CLIS"
   [ "$WANT_ORCH" = "yes" ] && echo "Orchestrator:   http://127.0.0.1:$PORT  (systemctl --user status redteam-orchestrator)"
   echo ""
